@@ -22,6 +22,7 @@ An educational Spring Boot service that models an asynchronous rewards-payment w
 - [Testing](#testing)
 - [Project structure](#project-structure)
 - [Reliability and operational concerns](#reliability-and-operational-concerns)
+- [Addressed or partially addressed limitations](#addressed-or-partially-addressed-limitations)
 - [Known limitations](#known-limitations)
 - [Recommended next steps](#recommended-next-steps)
 - [Documentation and learning notes](#documentation-and-learning-notes)
@@ -205,7 +206,7 @@ The error handler retries transient failures and then publishes an unprocessable
 | In-memory idempotency cache | Fast duplicate checks | Lost on restart, inconsistent across replicas, unbounded memory concerns | Not sufficient |
 | Distributed workflow/orchestration platform | Rich retries and workflow visibility | More infrastructure than this small problem needs | Future option for multi-step workflows |
 
-This is a pragmatic learning architecture: Kafka handles transport and buffering, while PostgreSQL owns business state and constraints. A production system would add an outbox or equivalent delivery guarantee to close the gap between database commits and message publication.
+This is a pragmatic learning architecture: Kafka handles transport and buffering, while PostgreSQL owns business state and constraints. The repository now contains the foundation of an outbox, but that flow still needs to be completed and tested before it can provide a production-grade database-to-message delivery guarantee.
 
 ## Data model
 
@@ -396,6 +397,15 @@ Useful future tests include producer/consumer serialization tests, outbox persis
 - **Security:** use secrets management, TLS/SASL for Kafka, database least privilege, authentication, authorization, and request rate limits.
 - **Concurrency:** protect against concurrent updates and define behavior for insufficient funds or negative balances.
 - **Delivery guarantees:** the repository has an incomplete outbox implementation; do not assume it currently provides atomic database-and-message behavior.
+
+## Addressed or partially addressed limitations
+
+The following items from earlier iterations have been addressed or have implementation groundwork in the current code:
+
+1. **Producer/consumer payload mismatch — addressed:** `TransactionProducer` and `TransactionConsumer` now use the shared typed `TransactionEvent` record with `idempotencyKey`, `accountId`, and `amount`. The previous nested-map versus top-level-field mismatch is no longer present.
+2. **Optimistic-locking foundation — added, not complete:** `Account` now has a JPA `@Version` field, and `V2__add_version_to_accounts.sql` adds the matching database column. Conflict handling and retry behavior remain open limitations below.
+3. **Transactional-outbox foundation — added, not complete:** `V3__create_outbox_table.sql`, `OutboxEvent`, `OutboxEventRepository`, and `OutboxRelayService` now exist. The controller persistence, scheduling, delivery acknowledgment, and duplicate protection still need to be completed.
+4. **Poison-pill test branch — removed:** the consumer no longer contains the previous hard-coded `poison_pill` account branch. Failure and DLT behavior still need dedicated automated coverage.
 
 ## Known limitations
 
