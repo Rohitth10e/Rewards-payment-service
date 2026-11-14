@@ -36,6 +36,14 @@ public class TransactionConsumer {
 
         try {
             // 1. Attempt to record the transaction in the ledger
+
+            // --- INJECT POISON PILL TEST ---
+            if ("poison_pill".equals(accountId)) {
+                System.out.println("💀 Poison pill detected! Crashing consumer...");
+                throw new RuntimeException("Simulating a severe system failure!");
+            }
+            // -------------------------------
+            
             LedgerEntry ledgerEntry = new LedgerEntry();
             ledgerEntry.setIdempotencyKey(idempotencyKey);
             ledgerEntry.setAccountId(accountId);
