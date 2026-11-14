@@ -1,0 +1,55 @@
+# Build output
+target/
+build/
+out/
+
+# Maven wrapper downloaded artifacts
+.mvn/wrapper/maven-wrapper.jar
+
+# IDE metadata
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+.classpath
+.project
+.settings/
+.factorypath
+.apt_generated/
+.springBeans
+.sts4-cache
+
+# Gradle and other build metadata
+.gradle/
+bin/
+
+# Test and coverage output
+coverage/
+.coverage/
+*.exec
+*.class
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# NetBeans
+/nbproject/private/
+/nbbuild/
+/nbdist/
+/.nb-gradle/

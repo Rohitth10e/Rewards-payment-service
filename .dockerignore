@@ -1,0 +1,42 @@
+# Version control and repository metadata
+.git/
+.gitignore
+.gitattributes
+
+# Build output and local tooling
+target/
+build/
+out/
+.mvn/
+.gradle/
+*.class
+coverage/
+.coverage/
+
+# IDE metadata
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+.classpath
+.project
+.settings/
+
+# Tests and local-only files
+src/test/
+*.log
+*.tmp
+*.swp
+*~
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Documentation and project-only files
+*.md
+docker-compose.yml
