@@ -9,6 +9,7 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Service;
 
+import com.example.rewards_payment_service.dto.TransactionEvent;
 import com.example.rewards_payment_service.dto.TransactionRequest;
 import com.example.rewards_payment_service.entity.LedgerEntry;
 import com.example.rewards_payment_service.repository.AccountRepository;
@@ -29,21 +30,13 @@ public class TransactionConsumer {
 
     @KafkaListener(topics = "txn.requested", groupId = "rewards-group")
     @Transactional(dontRollbackOn = DataIntegrityViolationException.class)
-    public void processTransaction(@Payload Map<String, Object> payload) {
-        String idempotencyKey = (String) payload.get("idempotencyKey");
-        String accountId = (String) payload.get("accountId");
-        BigDecimal amount = new BigDecimal((String) payload.get("amount"));
+    public void processTransaction(@Payload TransactionEvent event) {
+        String idempotencyKey = event.idempotencyKey();
+        String accountId = event.accountId();
+        BigDecimal amount = event.amount();
+
 
         try {
-            // 1. Attempt to record the transaction in the ledger
-
-            // --- INJECT POISON PILL TEST ---
-            if ("poison_pill".equals(accountId)) {
-                System.out.println("💀 Poison pill detected! Crashing consumer...");
-                throw new RuntimeException("Simulating a severe system failure!");
-            }
-            // -------------------------------
-            
             LedgerEntry ledgerEntry = new LedgerEntry();
             ledgerEntry.setIdempotencyKey(idempotencyKey);
             ledgerEntry.setAccountId(accountId);
@@ -52,7 +45,7 @@ public class TransactionConsumer {
             ledgerEntryRepository.save(ledgerEntry);
 
             // 2. If successful, update the account balance
-            Account acc = accountRepository.findById(accountId).orElseThrow(() -> new RuntimeException("Account not found"));
+            Account acc = accountRepository.findById(accountId).orElseThrow(() -> new RuntimeException("Account not found: " + accountId));
             acc.setBalance(acc.getBalance().subtract(amount));
             accountRepository.save(acc);
 

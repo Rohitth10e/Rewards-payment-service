@@ -2,6 +2,8 @@ package com.example.rewards_payment_service.service;
 
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
+
+import com.example.rewards_payment_service.dto.TransactionEvent;
 import com.example.rewards_payment_service.dto.TransactionRequest;
 
 import java.util.HashMap;
@@ -20,13 +22,10 @@ public class TransactionProducer {
 
     // this is the method that actually builds and sends the message. It takes the unique idempotencyKey and the TransactionRequest data.
     public void publishTransaction(String idempotencyKey, TransactionRequest transactionRequest) {
-        // Create a map to hold the message data
-        Map<String, Object> payload = new HashMap<>();
-        payload.put("idempotencyKey", idempotencyKey);
-        payload.put("transactionRequest", transactionRequest);
+        TransactionEvent event = new TransactionEvent(idempotencyKey, transactionRequest.accountId(), transactionRequest.amount());
 
         // Send the message to the Kafka topic
-        kafkaTemplate.send(TOPIC, transactionRequest.accountId(), payload);
+        kafkaTemplate.send(TOPIC, transactionRequest.accountId(), event);
     }
     
 }
