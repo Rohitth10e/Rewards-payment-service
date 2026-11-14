@@ -1,8 +1,8 @@
 # Rewards Payment Service
 
-An educational Spring Boot service that accepts reward-payment requests, places them on Apache Kafka, and applies them to a PostgreSQL-backed account ledger. The project demonstrates an asynchronous, event-driven payment workflow with request validation, database migrations, idempotency, and dead-letter handling.
+An educational Spring Boot service that models an asynchronous rewards-payment workflow using Spring Boot, PostgreSQL, Apache Kafka, JPA, and Flyway. The repository contains the HTTP request model, a typed Kafka event producer/consumer path, account versioning, and an in-progress transactional-outbox implementation.
 
-> **Project status:** This repository is a learning-oriented foundation, not a production-ready payment processor. The [Known limitations](#known-limitations) section is important before using it as a reference implementation.
+> **Project status:** This repository is a learning-oriented foundation, not a production-ready payment processor. The current controller validates a request and returns `202 Accepted`, but it does not yet persist the outbox event or invoke the Kafka producer. Read [Current implementation status](#current-implementation-status) before using it as an end-to-end reference.
 
 ## Table of contents
 
@@ -10,6 +10,7 @@ An educational Spring Boot service that accepts reward-payment requests, places 
 - [What this project solves](#what-this-project-solves)
 - [Real-life examples](#real-life-examples)
 - [Architecture](#architecture)
+- [Current implementation status](#current-implementation-status)
 - [Request lifecycle](#request-lifecycle)
 - [Architectural decisions](#architectural-decisions)
 - [Why this approach](#why-this-approach)
@@ -40,17 +41,18 @@ The central problem is therefore: **how can a service accept a transaction reque
 
 ## What this project solves
 
-This service provides a small example of the following solution:
+The intended design provides a small example of the following solution:
 
 1. Validate an incoming transaction at the HTTP boundary.
-2. Return `202 Accepted` after publishing a message to Kafka.
-3. Consume the message asynchronously.
-4. Record the transaction in a PostgreSQL ledger.
-5. Update the account balance.
-6. Use a unique idempotency key to detect duplicate delivery.
-7. Retry consumer failures and route exhausted messages to a dead-letter topic.
+2. Store the request in an outbox as part of the application’s database workflow.
+3. Publish a typed event to Kafka.
+4. Consume the message asynchronously.
+5. Record the transaction in a PostgreSQL ledger.
+6. Update the account balance.
+7. Use a unique idempotency key to detect duplicate delivery.
+8. Retry consumer failures and route exhausted messages to a dead-letter topic.
 
-The API is intentionally asynchronous: `202 Accepted` means that the request was accepted for processing, not that the balance has already changed.
+The API is intentionally asynchronous: `202 Accepted` means that the HTTP request passed validation and was accepted by the controller. It does **not** currently prove that an outbox row was written, a Kafka message was published, or the balance was changed.
 
 ## Real-life examples
 
@@ -83,8 +85,14 @@ Mobile clients and API gateways may retry after a timeout even when the first re
                   |
                   v
      +-------------------------+
-     | TransactionProducer      |
-     | publish txn.requested   |
+     | OutboxEvent              |
+     | intended durable handoff|
+     +------------+------------+
+                  |
+                  v
+     +-------------------------+
+     | OutboxRelayService       |
+     | intended scheduled relay |
      +------------+------------+
                   |
                   v
@@ -110,23 +118,48 @@ Mobile clients and API gateways may retry after a timeout even when the first re
 ### Main components
 
 - **`TransactionController`**: exposes `POST /transactions`, reads `Idempotency-Key`, and validates the JSON body.
-- **`TransactionProducer`**: sends a transaction event to `txn.requested`, using the account ID as the Kafka key.
-- **`TransactionConsumer`**: consumes events, inserts a ledger row, and subtracts the amount from the account balance.
+- **`TransactionProducer`**: can send a typed `TransactionEvent` to `txn.requested`, using the account ID as the Kafka key. The current controller does not invoke it.
+- **`OutboxEvent` / `OutboxEventRepository`**: model and query pending outbox rows.
+- **`OutboxRelayService`**: is intended to poll pending outbox rows and publish typed events to Kafka.
+- **`TransactionConsumer`**: consumes typed events, inserts a ledger row, and subtracts the amount from the account balance.
 - **`KafkaConfig`**: defines the topic, partitions, retry backoff, and dead-letter publishing.
-- **Spring Data repositories**: provide persistence access for `Account` and `LedgerEntry`.
-- **Flyway migration**: creates the database schema and seeds `acc_123`.
+- **Spring Data repositories**: provide persistence access for accounts, ledger entries, and outbox rows.
+- **Flyway migrations**: create the base schema, add account versioning, and create the outbox table.
+
+## Current implementation status
+
+The repository currently contains both an intended outbox flow and an older direct-producer flow. They are not fully wired together:
+
+| Area | Current behavior |
+|---|---|
+| HTTP validation | Implemented through `TransactionRequest` and `@Valid` |
+| HTTP response | Returns `202 Accepted` with no body |
+| Controller persistence | Not implemented: the controller creates an `OutboxEvent` object but never calls `OutboxEventRepository.save(...)` |
+| Direct producer | Implemented in `TransactionProducer`, but the controller no longer calls it |
+| Event contract | Implemented with the typed `TransactionEvent` record |
+| Outbox polling | Implemented in `OutboxRelayService`, but scheduling is not enabled by `@EnableScheduling` in the application |
+| Outbox delivery state | The relay marks a row processed immediately after calling asynchronous `kafkaTemplate.send(...)`; send success is not awaited or handled |
+| Consumer processing | Implemented for typed events; inserts a ledger entry and subtracts from the account |
+| Optimistic locking | `Account` has `@Version`, backed by `V2__add_version_to_accounts.sql` |
+| Retry/DLT configuration | Implemented through `DefaultErrorHandler` and `DeadLetterPublishingRecoverer` |
+
+Consequently, a request can receive `202` without producing a database row or Kafka record in the current state. The outbox path should be completed and tested before describing the service as an operational end-to-end payment flow.
 
 ## Request lifecycle
 
+The intended flow is:
+
 1. A client sends a transaction request with an idempotency key.
 2. Bean Validation checks that `accountId` is non-blank and `amount` is at least `0.01`.
-3. The producer publishes an event to Kafka.
-4. The controller responds with `202 Accepted` and an empty body.
+3. The request is intended to be persisted as an outbox row.
+4. A scheduled relay is intended to publish a typed `TransactionEvent` to Kafka.
 5. The consumer receives the event.
 6. The consumer attempts to insert a ledger entry. The database unique constraint protects the idempotency key.
 7. For a new entry, the account balance is reduced in the same Spring transaction.
 8. A processing exception is retried three times with a one-second fixed delay.
-9. If retries are exhausted, Spring Kafka publishes the message to a dead-letter topic.
+9. If retries are exhausted, Spring Kafka publishes the message to a dead-letter destination.
+
+In the current implementation, step 3 is missing, scheduling for step 4 is not enabled, and the controller returns before either step can be confirmed.
 
 ## Architectural decisions
 
@@ -148,11 +181,15 @@ Balances and ledger entries require transactional persistence, constraints, and 
 
 ### Database-enforced idempotency
 
-The `ledger_entries.idempotency_key` column is `UNIQUE NOT NULL`. Enforcing uniqueness in the database is safer than relying only on an in-memory set, which would be lost during restarts and would not work across multiple application instances.
+The `ledger_entries.idempotency_key` column is `UNIQUE NOT NULL`. Enforcing uniqueness in the database is safer than relying only on an in-memory set, which would be lost during restarts and would not work across multiple application instances. The outbox table currently does not have a unique constraint on `idempotency_key`, so duplicate requests can create multiple outbox rows once saving is wired.
 
 ### Flyway migrations
 
-The schema is versioned in source control through `V1__init__schema.sql`. This makes local setup repeatable and gives future schema changes an ordered history.
+The schema is versioned in source control through `V1__init__schema.sql`, `V2__add_version_to_accounts.sql`, and `V3__create_outbox_table.sql`. This makes local setup repeatable and gives future schema changes an ordered history.
+
+### Optimistic account versioning
+
+`Account.version` is mapped with JPA `@Version`, and migration V2 adds the corresponding column. Hibernate can use this value to detect conflicting updates. The current code does not yet implement a retry or user-facing response for an optimistic-lock conflict.
 
 ### Dead-letter topic after bounded retries
 
@@ -186,10 +223,22 @@ This is a pragmatic learning architecture: Kafka handles transport and buffering
 | `id` | Database-generated ledger identifier |
 | `idempotency_key` | Unique business request key |
 | `account_id` | Account affected by the transaction |
-| `amount` | Amount debited by the current implementation |
+| `amount` | Amount debited by the current consumer implementation |
 | `created_at` | Time at which the entry was created |
 
 The migration seeds account `acc_123` with a balance of `1000.00`.
+
+### `outbox_events`
+
+| Column | Meaning |
+|---|---|
+| `id` | Database-generated outbox identifier |
+| `idempotency_key` | Business request key |
+| `account_id` | Account associated with the event |
+| `amount` | Transaction amount |
+| `processed` | Whether the relay has marked the row as published |
+
+The current outbox schema does not include a unique constraint, timestamp, retry count, or publication error details.
 
 ## Technology stack
 
@@ -238,7 +287,7 @@ The default local credentials are defined in [`docker-compose.yml`](./docker-com
 ./mvnw spring-boot:run
 ```
 
-Flyway runs the initial migration on startup. The application reads its local connection and Kafka settings from [`application.yml`](./src/main/resources/application.yml).
+Flyway runs all pending migrations on startup. The application reads its local connection and Kafka settings from [`application.yml`](./src/main/resources/application.yml).
 
 ### 4. Submit a transaction
 
@@ -255,7 +304,7 @@ Expected HTTP response:
 HTTP/1.1 202 Accepted
 ```
 
-Use the same idempotency key to model a client retry. The intended consumer behavior is to keep one ledger entry for that business operation.
+The endpoint currently responds with `202`, but the current controller does not persist or publish the request. Reusing the same idempotency key is still the intended way to model a client retry once the outbox write is wired.
 
 ### 5. Stop infrastructure
 
@@ -312,7 +361,7 @@ Run all tests with:
 ./mvnw test
 ```
 
-Useful future tests include consumer integration tests with Testcontainers, duplicate-delivery tests, account-not-found tests, balance-underflow tests, and dead-letter verification.
+Useful future tests include producer/consumer serialization tests, outbox persistence tests, scheduled relay tests, duplicate-delivery tests, account-not-found tests, optimistic-lock conflict tests, balance-underflow tests, and dead-letter verification.
 
 ## Project structure
 
@@ -329,7 +378,7 @@ Useful future tests include consumer integration tests with Testcontainers, dupl
     │   ├── dto/          # Validated request records
     │   ├── entity/       # JPA persistence models
     │   ├── repository/   # Spring Data repositories
-    │   └── service/      # Producer and consumer
+    │   └── service/      # Producer, consumer, and outbox relay
     ├── main/resources/
     │   ├── application.yml
     │   └── db/migration/ # Flyway migrations
@@ -346,30 +395,32 @@ Useful future tests include consumer integration tests with Testcontainers, dupl
 - **Observability:** add structured logs, correlation IDs, Kafka lag metrics, processing latency, and database failure metrics.
 - **Security:** use secrets management, TLS/SASL for Kafka, database least privilege, authentication, authorization, and request rate limits.
 - **Concurrency:** protect against concurrent updates and define behavior for insufficient funds or negative balances.
-- **Delivery guarantees:** consider an outbox pattern, transactional Kafka publishing, or a workflow coordinator where atomic database-and-message behavior is required.
+- **Delivery guarantees:** the repository has an incomplete outbox implementation; do not assume it currently provides atomic database-and-message behavior.
 
 ## Known limitations
 
 These are deliberately recorded so the documentation remains faithful to the current source:
 
-1. **Producer/consumer payload mismatch:** `TransactionProducer` currently publishes a map containing `idempotencyKey` and a nested `transactionRequest`. `TransactionConsumer` currently reads `accountId` and `amount` as top-level map fields. The event contract should be aligned before relying on end-to-end processing.
-2. **No result tracking endpoint:** the API accepts work but does not expose a transaction ID or processing status.
-3. **No balance guard:** the consumer subtracts the amount without checking available balance or preventing an invalid negative balance.
-4. **No explicit database locking:** concurrent transactions for one account need a defined locking or optimistic-versioning strategy.
-5. **No outbox:** a production-grade design should address the possibility of a process failure around message publication and persistence.
-6. **Development configuration:** credentials, localhost endpoints, permissive JSON trusted packages, and plaintext Kafka are suitable only for local learning.
-7. **Poison-pill branch:** the consumer contains an intentional `poison_pill` account ID path for exercising failure and DLT behavior.
+1. **Controller does not persist or publish:** it creates an `OutboxEvent` in memory and immediately returns `202`.
+2. **Scheduling is not enabled:** `OutboxRelayService` uses `@Scheduled`, but the application does not currently declare `@EnableScheduling`.
+3. **Relay send acknowledgment is not handled:** the relay marks events processed immediately after invoking asynchronous `kafkaTemplate.send(...)`.
+4. **Outbox idempotency is not constrained:** `outbox_events.idempotency_key` is not unique.
+5. **No result tracking endpoint:** the API accepts work but does not expose a transaction ID or processing status.
+6. **No balance guard:** the consumer subtracts the amount without checking available balance or preventing an invalid negative balance.
+7. **Optimistic-lock conflicts are not handled:** the account has a version column, but there is no retry or error policy for conflicts.
+8. **Development configuration:** credentials, localhost endpoints, permissive JSON trusted packages, and plaintext Kafka are suitable only for local learning.
+9. **DLT naming should be verified:** the configuration declares `txn.requested-dlt`, while `DeadLetterPublishingRecoverer` is constructed without an explicit destination resolver and defaults may produce a different suffix-based destination.
 
 ## Recommended next steps
 
-1. Introduce a typed `TransactionEvent` shared by producer and consumer.
-2. Return a transaction/correlation ID and add `GET /transactions/{id}`.
-3. Add explicit debit/credit semantics, currency, and balance validation.
-4. Add a unique constraint mapping and integration tests for duplicate delivery.
-5. Add optimistic locking or a database-side atomic balance update.
-6. Add an outbox table and publisher for reliable event publication.
-7. Add authentication, authorization, secret injection, and TLS.
-8. Add metrics, structured logging, tracing, and DLT monitoring.
+1. Inject `OutboxEventRepository` into the controller and save the event inside a transaction.
+2. Enable scheduling and make the relay await or handle Kafka send success before marking an event processed.
+3. Add a unique constraint and retry/error metadata to `outbox_events`.
+4. Return a transaction/correlation ID and add `GET /transactions/{id}`.
+5. Add explicit debit/credit semantics, currency, and balance validation.
+6. Define optimistic-lock conflict handling or use a database-side atomic balance update.
+7. Configure and test the intended DLT destination explicitly.
+8. Add authentication, authorization, secret injection, TLS, metrics, structured logging, tracing, and DLT monitoring.
 9. Use Testcontainers for PostgreSQL and Kafka integration tests.
 
 ## Documentation and learning notes
